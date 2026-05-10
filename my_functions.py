@@ -15,6 +15,62 @@ import my_cmap
 EARTH_R=(6378.1, 6356.7)
 POLAR_FLATTENING = (EARTH_R[1] / EARTH_R[0]) ** 1
 
+def Film2BT(img, bit_depth=8):
+    Gray_BT_matching = np.array([
+        [20, 29.5],
+        [53, 23],
+        [75, 18.5],
+        [100, 13],
+        [124, 4],
+        [155, -15],
+        [174, -31],
+        [186, -42],
+        [196, -54],
+        [205, -64],
+        [210, -70],
+        [218.7, -80],
+        [227, -92]
+    ]).T
+    x,y = Gray_BT_matching[0], Gray_BT_matching[1]
+    if bit_depth == 8:
+        pass
+    elif bit_depth == 16:
+        x = x / 255 * 65535
+    else:
+        raise ValueError('Invalid bit depth. Use 8 or 16.')
+    cs = CubicSpline(x,y)
+
+    return cs(img)
+
+def BT2Film(img, bit_depth=8):
+    Gray_BT_matching = np.array([
+        [20, 29.5],
+        [53, 23],
+        [75, 18.5],
+        [100, 13],
+        [124, 4],
+        [155, -15],
+        [174, -31],
+        [186, -42],
+        [196, -54],
+        [205, -64],
+        [210, -70],
+        [218.7, -80],
+        [227, -92]
+    ]).T[:,::-1]
+
+    x,y = Gray_BT_matching[0], Gray_BT_matching[1]
+    if bit_depth == 8:
+        pass
+    elif bit_depth == 16:
+        x = x / 255 * 65535
+    else:
+        raise ValueError('Invalid bit depth. Use 8 or 16.')
+
+    cs = CubicSpline(y,x)
+
+    return cs(img)
+
 def get_path_via_gui(mode='file'):
     '''
     Opens a GUI to select either a 'file' or a 'directory'.
@@ -23,11 +79,11 @@ def get_path_via_gui(mode='file'):
     root.withdraw()
     path = ''
     if mode == 'file':
-        path = filedialog.askopenfilename(title='Select Reference Image')
+        path = filedialog.askopenfilename(title='Select Image')
     elif mode == 'dir':
         path = filedialog.askdirectory(title='Select Folder for Batch Processing')
     elif mode == 'csv':
-        path = filedialog.askdirectory(title='Select csv file')
+        path = filedialog.askdirectory(title='Select csv File')
     else:
         raise ValueError('Invalid mode. Use "file" or "dir" or "csv".')
     root.destroy()
@@ -440,7 +496,7 @@ def analyze_brightness(path=None, visualize=False, save_preview=False):
     '''
     Processes the standard image to establish target brightness.
     '''
-    if path == None:
+    if path is None:
         ref_path = select_input(mode='file')
     else:
         ref_path = path
@@ -528,7 +584,7 @@ def run_batch_metadata_extraction():
     for path in images:
         filename = os.path.basename(path)
         if 'VS' in filename:
-            print(f"Skipped: {filename} is a VIS image.")
+            print(f'Skipped: {filename} is a VIS image.')
             continue
         else:
             success, path, bright, dark, bright_coeffs, dark_coeffs, circle = analyze_brightness(path=path, visualize=True, save_preview=True)
@@ -602,10 +658,19 @@ def apply_nonlinear_calibration(img, bright_coeffs, dark_coeffs, std_bright, std
     calibrated = img_f + pixel_offset
     del img_f
     del pixel_offset
-    calibrated_img = np.clip(calibrated, 0, 255).astype(np.uint8)
+
+    output_16bit = True
+    if output_16bit:
+        #convert to 16-bit single channel
+        if np.max(calibrated) >= 256:
+            pass
+        else:
+            calibrated = calibrated / 255 * 65535
+        calibrated_img = np.clip(calibrated, 0, 65535).astype(np.uint16)
+    else:
+        calibrated_img = np.clip(calibrated, 0, 255).astype(np.uint8)
     if len(calibrated_img.shape) > 2:
         # Convert from BGR or RGBA to Grayscale
-        # If the error said CV_8UC4, it's likely BGRA
         gray_img = cv2.cvtColor(calibrated_img, cv2.COLOR_BGRA2GRAY)
     else:
         gray_img = calibrated_img
@@ -702,41 +767,68 @@ def run_batch_crop_png(mode='dir',csv_path=None):
         del cropped_img
 
 
-def Film2BT(img):
-    Gray_BT_matching = np.array([
-        [20, 27],
-        [53, 22],
-        [75, 18],
-        [100, 11],
-        [122, 1],
-        [149, -15],
-        [171, -31],
-        [183, -42],
-        [195.5, -54],
-        [204, -64],
-        [209.5, -70],
-        [218.2, -80],
-        [227, -92],
+def blend_arrays_f(array_low, array_high, threshold, use_low=True, low_weight_range=(0,1)):
+    '''
+    Blend two arrays based on a threshold, by default evaluated on the low array
+    :param array_low:
+    :param array_high:
+    :param threshold:
+    :param use_low: bool, whether to use the low array or high array
+    :return:
+    '''
+    low_min, low_max = low_weight_range
+    if array_low.shape != array_high.shape:
+        raise ValueError('Arrays must have the same shape!')
 
-    ]).T
-    cs = CubicSpline(Gray_BT_matching[0], Gray_BT_matching[1])
+    if use_low:
+        low_weight = np.clip((threshold - array_low) * 100000,low_min, low_max)
+    else:
+        low_weight = np.clip((threshold - array_high) * 100000,low_min, low_max)
+    blended = (array_low * low_weight) + (array_high * (1.0 - low_weight))
+    return blended
 
-    return cs(img)
 
-
-def plot_BT_image(image_path, image_folder, cn = 'ir_cc_2',gauss_smooth=True, zoom_in=True, save_image=False):
-    timestamp = os.path.basename(image_path).split('_')[2]
+def plot_BT_image(image_path, image_folder,
+                  cn = 'ir_cc_2',gauss_smooth=True, zoom_in=True, save_image=False):
+    # Find timestamp given filename format: GMS1_IR_YYYYMMDDZHHMM_nnnpx.png
+    filename = os.path.basename(image_path)
     img = load_image_lossless(image_path)
+
+    # Assuming brightest pixel in 16-bit png is brighter than 255
+    if np.max(img) >= 256:
+        bit_depth = 16
+    else:
+        bit_depth = 8
+    print(f'Bit depth: {bit_depth}, brightest pixel: {np.max(img)}')
+
     if gauss_smooth:
-        img = cv2.GaussianBlur(img, (3, 3), 1)
-    display_img = np.array(img)
-    del img
-    img_bt = Film2BT(display_img)
+        img_original = np.array(img)
+        #img = cv2.GaussianBlur(img, (5, 1), 0.6)
+        #img = cv2.GaussianBlur(img, (1, 9), 1.4)
+        img = cv2.GaussianBlur(img, (5, 5), 0.75)
+        img_blurred = np.array(img)
+        del img
+
+        # Uses original image for T > -45 deg C (darker brightness)
+        blend_arrays = True
+        if blend_arrays:
+            T_blur = -45
+            V_blur = BT2Film(T_blur, bit_depth=bit_depth)
+            display_img = blend_arrays_f(img_original, img_blurred, V_blur, low_weight_range=(0,0.5))
+        else:
+            display_img = img_blurred
+        del img_original, img_blurred
+        print(f'Blur applied to {filename}.')
+    else:
+        display_img = np.array(img)
+        del img
+
+    img_bt = Film2BT(display_img, bit_depth=bit_depth)
     del display_img
 
-    zoom_in = True
     if zoom_in:
-        img_bt = img_bt[400:1200, 400:1200]
+        h, w = img_bt.shape
+        img_bt = img_bt[h//4:h//4+h//2, w//4:w//4+w//2]
 
 
     if hasattr(cn, '__iter__') and not isinstance(cn, str):
@@ -746,7 +838,10 @@ def plot_BT_image(image_path, image_folder, cn = 'ir_cc_2',gauss_smooth=True, zo
     for cmap_name in cmap_names:
         cmap, vmin, vmax = my_cmap.cmap_fetch(cmap_name)
 
+        print('Plotting now.')
+
         if not save_image:
+            timestamp = os.path.basename(image_path).split('_')[2]
             fig = plt.figure(figsize=(8, 8))
             fig.suptitle(f'Rita {timestamp}')
             gs = fig.add_gridspec(1, 1)
@@ -763,9 +858,11 @@ def plot_BT_image(image_path, image_folder, cn = 'ir_cc_2',gauss_smooth=True, zo
             plt.show()
         else:
             filename = os.path.basename(image_path)
+            if zoom_in:
+                filename = filename.replace(f'_{h}px', f'_{h//2}px')
             new_name = change_extension(filename, '.png', ('.png', '.bmp', '.jpg', '.jpeg'))
             new_name = new_name.replace('_calibrated', '').replace('_cropped','')
-            new_name = new_name.replace('_IR_', f'_{cmap_name}_')
+            new_name = new_name.replace('_IR_', f'_{cmap_name.replace('_','')}_')
             new_im_dir = image_folder
             new_im_dir.mkdir(exist_ok=True)
             new_im_path = new_im_dir / new_name
@@ -792,5 +889,9 @@ def batch_plot_BT_image(mode='file', cmap_name='ir_cc_2', gauss_smooth=True, zoo
         return
 
     for path in images:
-
-        plot_BT_image(path, image_folder, cmap_name, save_image=save_image)
+        filename = os.path.basename(path)
+        if '_IR_' in filename:
+            plot_BT_image(path, image_folder, cmap_name,
+                          save_image=save_image, zoom_in=zoom_in, gauss_smooth=gauss_smooth)
+        else:
+            print(f'Skipped: {filename} is not a raw IR image.')

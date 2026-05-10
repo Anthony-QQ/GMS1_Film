@@ -42,7 +42,7 @@ def produce_cmap(cvals, colors, name):
     vmin, vmax = min(cvals), max(cvals)
     norm = plt.Normalize(vmin, vmax)
     tuples = list(zip(map(norm, cvals), colors))
-    cmap = LinearSegmentedColormap.from_list(name, tuples, N=4196, gamma=1.0)
+    cmap = LinearSegmentedColormap.from_list(name, tuples, N=4096, gamma=1.0)
     # mpl.colormaps.register(cmap,name=name,force=false)
     return list((cmap, vmin, vmax))
 
