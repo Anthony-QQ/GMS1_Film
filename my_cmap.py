@@ -199,22 +199,6 @@ def cmap_fetch(name, type='ir'):
          '#ffe1e1', '#644646',
          'w', 'k']
     ],
-    'ir_color': [
-        [-100, -90,
-         -90, -80,
-         -80, -70,
-         -70, -60,
-         -60, -50,
-         -50, -30,
-         -30, 28],
-        ['#5000a0', 'w',
-         'k', '#ffff00',
-         '#ff0000', '#640000',
-         '#00ff00', '#006400',
-         '#0000ff', '#000064',
-         '#545454', '#a8ffff',
-         'w', 'k']
-    ],
     'ir_nrl_h_1': [
         [-173, -123, -93,
          -93, -83, -73, -63, -61,
@@ -258,6 +242,22 @@ def cmap_fetch(name, type='ir'):
     'ir_test_1': [
         [-95, -90, -85, -81, -76, -70, -64, -54, -42, -31, -12, 7, 11, 30, 45],
         ['#FFFFFF', '#FAEEFA', '#D0DDF5', '#99D0FF', '#77D0DD', '#77C3BB', '#55BB88', '#44B044', '#77AA44', '#90A077', '#8C8877', '#886666', '#772255', '#441155', '#111111']
+    ],
+    'ir_zehr': [
+        [-100, -90,
+         -90, -80,
+         -80, -70,
+         -70, -60,
+         -60, -50,
+         -50, -30,
+         -30, 28],
+        ['#5000a0', 'w',
+         'k', '#ffff00',
+         '#ff0000', '#640000',
+         '#00ff00', '#006400',
+         '#0000ff', '#000064',
+         '#545454', '#a8ffff',
+         'w', 'k']
     ],
     'pct_1': [
         list(np.array([100, 130, 160,
@@ -423,7 +423,7 @@ def cmap_fetch(name, type='ir'):
     ]
     }
 
-    cmap_dict['ir_zehr'] = cmap_dict['ir_color']
+    cmap_dict['ir_color'] = cmap_dict['ir_zehr']
 
     cvals, colors = cmap_dict.get(name, cmap_dict[f'{type}_bw'])
     return produce_cmap(cvals, colors, name)   #returns list of [cmap, vmin, vmax]

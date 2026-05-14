@@ -7,6 +7,7 @@ import os
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
 from scipy.interpolate import CubicSpline
 from tkinter import filedialog
 
@@ -71,19 +72,22 @@ def BT2Film(img, bit_depth=8):
 
     return cs(img)
 
-def get_path_via_gui(mode='file'):
+def get_path_via_gui(mode='file',title=None):
     '''
     Opens a GUI to select either a 'file' or a 'directory'.
     '''
+    default_titles = {'file': 'Select Image', 'dir': 'Select Folder for Batch Processing', 'csv': 'Select csv File'}
+    if title is None:
+        title = default_titles.get(mode)
     root = tk.Tk()
     root.withdraw()
     path = ''
     if mode == 'file':
-        path = filedialog.askopenfilename(title='Select Image')
+        path = filedialog.askopenfilename(title=title)
     elif mode == 'dir':
-        path = filedialog.askdirectory(title='Select Folder for Batch Processing')
+        path = filedialog.askdirectory(title=title)
     elif mode == 'csv':
-        path = filedialog.askdirectory(title='Select csv File')
+        path = filedialog.askopenfilename(title=title)
     else:
         raise ValueError('Invalid mode. Use "file" or "dir" or "csv".')
     root.destroy()
@@ -242,7 +246,7 @@ def find_earth_disk(img, scale_to_width=800.0, flattening=POLAR_FLATTENING):
     # 1. Determine downsample factor (e.g., target a width of ~1000px)
     original_h, original_w = img.shape[:2]
     scale_factor = scale_to_width / original_w
-    #flattening = 1.4
+
     new_w = round(original_w * scale_factor)
     new_h = round(original_h * scale_factor / flattening) #flat earth disk is stretched vertically
 
@@ -462,8 +466,8 @@ def visualize_sampling(img, rect, circle, path=None, save_preview=False):
     cv2.ellipse(display_img, (int(cx), int(cy)),
                (int(radius),int(radius*POLAR_FLATTENING)), 0, 0, 360, (0, 0, 255), 5)
 
-    # Draw the center of the film frame in cyan
-    cv2.circle(display_img, (rx + rw // 2, ry + rh // 2), int(rh * 0.02), (0, 255, 255), 5)
+    # Draw the center of the full disk circle in cyan
+    cv2.circle(display_img, (int(cx), int(cy)), int(radius * 0.03), (0, 255, 255), 5)
 
     # Draw each sampling patch in red
     for (sx, sy, sw, sh) in bright_samples:
@@ -481,6 +485,7 @@ def visualize_sampling(img, rect, circle, path=None, save_preview=False):
         preview_fn = change_extension(filename, '.png', ('.png', '.bmp', '.jpg', '.jpeg')).replace('.png', '_sampling.png')
         preview_path = get_calibration_folder(Path(path).parent) / f'{preview_fn}'
         plt.savefig(preview_path, dpi=150, bbox_inches='tight')
+        print(f'Preview saved to {preview_path}.')
         plt.close()
     else:
         plt.show()
@@ -571,7 +576,11 @@ def log_coefficients(file_paths, filename, coeffs_b, coeffs_d, pred_z_b, pred_z_
     log_to_multiple_files(file_paths, header_row, data_row)
 
 
-def run_batch_metadata_extraction():
+def run_batch_metadata_extraction(save_csv=True, save_preview=False):
+    if save_preview:
+        visualize = True
+    else:
+        visualize = False
     # 1. Setup
     image_folder = get_path_via_gui(mode='dir')
     if not image_folder: return
@@ -587,58 +596,76 @@ def run_batch_metadata_extraction():
             print(f'Skipped: {filename} is a VIS image.')
             continue
         else:
-            success, path, bright, dark, bright_coeffs, dark_coeffs, circle = analyze_brightness(path=path, visualize=True, save_preview=True)
-            if success:
-                # Package data and log
-                log_coefficients([latest_csv, backup_csv], filename, bright_coeffs, dark_coeffs, bright, dark, circle)
+            (success, path, bright, dark,
+             bright_coeffs, dark_coeffs, circle) = analyze_brightness(path=path, visualize=visualize, save_preview=save_preview)
+            if save_csv:
+                if success:
+                    # Package data and log
+                    log_coefficients([latest_csv, backup_csv], filename, bright_coeffs, dark_coeffs, bright, dark, circle)
 
-                print(f"Analyzed: {filename} (Z_bright: {bright:.2f}, Z_dark: {dark:.2f})")
+                    print(f'Analyzed: {filename} (Z_bright: {bright:.2f}, Z_dark: {dark:.2f})')
+                else:
+                    print(f'Skipped: {filename} (Boundary error)')
             else:
-                print(f"Skipped: {filename} (Boundary error)")
+                print(f'Skipped: {filename} (CSV logging disabled)')
 
 
 def generate_background_planes(shape, coeffs):
     '''
     Creates a 2D array the same size as the image representing the background plane.
+    shape: (x1, y1, x2, y2)
     coeffs: (A, B, C)
     '''
-    h, w = shape
+    x1, y1, x2, y2 = shape
     # Create coordinate grids
-    x_coords = np.arange(w)
-    y_coords = np.arange(h)
+    x_coords = np.arange(x1, x2)
+    y_coords = np.arange(y1, y2)
     X, Y = np.meshgrid(x_coords, y_coords)
 
     # Calculate Z = Ax + By + C in one vectorized step
     plane = coeffs[0] * X + coeffs[1] * Y + coeffs[2]
     return plane
 
-def apply_nonlinear_calibration(img, bright_coeffs, dark_coeffs, std_bright, std_dark):
+def apply_nonlinear_calibration(img, bright_coeffs, dark_coeffs, std_bright, std_dark, crop=None):
     '''
     Calibrates image using a brightness-dependent non-linear offset.
     Solves A*brightness + B*sqrt(brightness) analytically.
+    img: input 8-bit or 16-bit image
+    bright_coeffs: (A, B, C) from the plane fit of the in-frame bright background to z = Ax + By + C
+    dark_coeffs: (A, B, C) from the plane fit of the out-frame dark background to z = Ax + By + C
+    std_bright: Standard brightness value
+    std_dark: Standard dark value
+    crop: (x1, y1, x2, y2) tuple of coordinates to crop
+    return: calibrated 16-bit grayscale image
     '''
     h, w = img.shape
 
+    if crop is None:
+        crop_corners = (0,0,w,h)
+    else:
+        crop_corners = crop
+
     # 1. Generate local background predictions for every pixel
-    z_b = generate_background_planes((h, w), bright_coeffs)
-    z_d = generate_background_planes((h, w), dark_coeffs)
+    z_b = generate_background_planes(crop_corners, bright_coeffs)
+    z_d = generate_background_planes(crop_corners, dark_coeffs)
 
     # 2. Calculate local offsets needed for 'Standard' targets
     # Note: These planes represent the 'Current' local conditions
     off_b_plane = std_bright - z_b
     off_d_plane = std_dark - z_d
     print('before sqrt')
-    # 4. Analytical solution for A and B (Denominator is shared)
+
+    # 4. Analytical solution for quadratic curve passing (0,0), (std_dark,dark_offset), (std_bright,bright_offset)
     # Denom = (Z_b * sqrt(Z_d)) - (Z_d * sqrt(Z_b))
     sqrt_zb = np.sqrt(z_b)
     sqrt_zd = np.sqrt(z_d)
 
     denominator = (z_b * sqrt_zd) - (z_d * sqrt_zb)
 
-    # Safety check for denominator to avoid NaN
+    # Safety override for denominator to avoid NaN
     denominator = np.where(np.abs(denominator) < 1e-6, 1e-6, denominator)
 
-    # Solve for A and B planes
+    # Solve for A and B where offset = A*img + B*sqrt(img)
     A_plane = (off_b_plane * sqrt_zd - off_d_plane * sqrt_zb) / denominator
     del sqrt_zb, sqrt_zd
     B_plane = (z_b * off_d_plane - z_d * off_b_plane) / denominator
@@ -647,6 +674,7 @@ def apply_nonlinear_calibration(img, bright_coeffs, dark_coeffs, std_bright, std
 
     # 5. Apply non-linear offset to actual pixel values
     # offset = A*img + B*sqrt(img)
+    img = img[crop_corners[1]:crop_corners[3], crop_corners[0]:crop_corners[2]]
     img_f = img.astype(np.float32)
     pixel_offset = A_plane * img_f + B_plane * np.sqrt(img_f)
 
@@ -669,17 +697,18 @@ def apply_nonlinear_calibration(img, bright_coeffs, dark_coeffs, std_bright, std
         calibrated_img = np.clip(calibrated, 0, 65535).astype(np.uint16)
     else:
         calibrated_img = np.clip(calibrated, 0, 255).astype(np.uint8)
+
     if len(calibrated_img.shape) > 2:
         # Convert from BGR or RGBA to Grayscale
         gray_img = cv2.cvtColor(calibrated_img, cv2.COLOR_BGRA2GRAY)
     else:
         gray_img = calibrated_img
 
-    del calibrated
+    del calibrated, calibrated_img
 
     return gray_img
 
-def run_batch_image_calibration(std_bright=221, std_dark=39, csv_path=None):
+def run_batch_image_calibration(mode='dir',std_bright=221, std_dark=39, csv_path=None, csv_fix_path=None, do_crop=False):
     '''
 
     :param std_bright: standard bright region brightness
@@ -688,13 +717,28 @@ def run_batch_image_calibration(std_bright=221, std_dark=39, csv_path=None):
     '''
     # 1. Setup
     print('start')
-    image_folder = get_path_via_gui(mode='dir')
-    if not image_folder: return
+    if mode=='dir':
+        image_folder = get_path_via_gui(mode=mode)
+        if not image_folder: return
+        images = get_image_list(image_folder)
+        image_folder = Path(image_folder)
+    elif mode=='file':
+        image = get_path_via_gui(mode=mode)
+        if not image: return
+        images = [image]
+        image_folder = Path(image).parent
+    else:
+        print('Invalid mode, choose "dir" or "file".')
+        return
 
     if csv_path is None:
         csv_path, _ = get_calibration_csv_paths(image_folder)
     all_coeffs_dict = load_coefficients(csv_path)
-    images = get_image_list(image_folder)
+
+    if do_crop:
+        if csv_fix_path is None:
+            csv_fix_path = get_path_via_gui(mode='csv',title='Select Fix CSV')
+        all_fixes_dict = load_fix_parameters(csv_fix_path)
 
     for path in images:
         filename = os.path.basename(path)
@@ -706,12 +750,26 @@ def run_batch_image_calibration(std_bright=221, std_dark=39, csv_path=None):
             bright_coeffs, dark_coeffs = coeffs['bright'], coeffs['dark']
             print(f'{filename} has calibration: {coeffs}.')
             img = load_image_lossless(path)
+            h,w = img.shape[:2]
 
-            calibrated_img = apply_nonlinear_calibration(img, bright_coeffs, dark_coeffs, std_bright, std_dark)
+            if do_crop:
+                fix = all_fixes_dict.get(filename)
+                cx, cy, r = int(fix['cx']), int(fix['cy']), int(fix['r'])
+                if r <= 0 or cx < r or cy < r or cx+r > w or cy+r > h:
+                    print(f'{filename} has invalid crop radius: {r}. Skipping crop.')
+                    crop = None
+                else:
+                    crop = (cx-r, cy-r, cx+r, cy+r)
+            else:
+                crop = None
+
+            calibrated_img = apply_nonlinear_calibration(img, bright_coeffs, dark_coeffs, std_bright, std_dark, crop)
             del img
             print(f'{filename} calibrated, now saving')
             cal_name = change_extension(filename, '.png', ('.png', '.bmp', '.jpg', '.jpeg'))
             cal_name = cal_name.replace('.png', '_calibrated.png')
+            if do_crop:
+                cal_name = cal_name.replace('.png', f'_{r*2}px.png')
             cal_dir = get_calibration_folder(image_folder)
             cal_dir.mkdir(exist_ok=True)
             cal_im_dir = cal_dir / 'Calibrated_PNG'
@@ -789,7 +847,7 @@ def blend_arrays_f(array_low, array_high, threshold, use_low=True, low_weight_ra
 
 
 def plot_BT_image(image_path, image_folder,
-                  cn = 'ir_cc_2',gauss_smooth=True, zoom_in=True, save_image=False):
+                  cn = 'ir_cc_2',gauss_smooth=True, zoom_in=True, save_image=False, batch_name=None):
     # Find timestamp given filename format: GMS1_IR_YYYYMMDDZHHMM_nnnpx.png
     filename = os.path.basename(image_path)
     img = load_image_lossless(image_path)
@@ -826,9 +884,12 @@ def plot_BT_image(image_path, image_folder,
     img_bt = Film2BT(display_img, bit_depth=bit_depth)
     del display_img
 
+    h, w = img_bt.shape
     if zoom_in:
-        h, w = img_bt.shape
         img_bt = img_bt[h//4:h//4+h//2, w//4:w//4+w//2]
+        final_h = h // 2
+    else:
+        final_h = h
 
 
     if hasattr(cn, '__iter__') and not isinstance(cn, str):
@@ -837,13 +898,16 @@ def plot_BT_image(image_path, image_folder,
         cmap_names = [cn]
     for cmap_name in cmap_names:
         cmap, vmin, vmax = my_cmap.cmap_fetch(cmap_name)
+        timestamp = os.path.basename(image_path).split('_')[2]
+        title = f'{timestamp}' if batch_name is None else f'{batch_name} {timestamp}'
+
 
         print('Plotting now.')
 
         if not save_image:
-            timestamp = os.path.basename(image_path).split('_')[2]
+
             fig = plt.figure(figsize=(8, 8))
-            fig.suptitle(f'Rita {timestamp}')
+            fig.suptitle(title)
             gs = fig.add_gridspec(1, 1)
             '''
             ax1 = fig.add_subplot(gs[0,0])
@@ -859,7 +923,7 @@ def plot_BT_image(image_path, image_folder,
         else:
             filename = os.path.basename(image_path)
             if zoom_in:
-                filename = filename.replace(f'_{h}px', f'_{h//2}px')
+                filename = filename.replace(f'_{h}px', f'_{final_h}px')
             new_name = change_extension(filename, '.png', ('.png', '.bmp', '.jpg', '.jpeg'))
             new_name = new_name.replace('_calibrated', '').replace('_cropped','')
             new_name = new_name.replace('_IR_', f'_{cmap_name.replace('_','')}_')
@@ -867,12 +931,41 @@ def plot_BT_image(image_path, image_folder,
             new_im_dir.mkdir(exist_ok=True)
             new_im_path = new_im_dir / new_name
 
-            plt.imsave(new_im_path, img_bt, cmap=cmap, vmin=vmin, vmax=vmax, format='png', pil_kwargs={'compress_level': 9})
+            # map to 8-bit RBGA
+            sm = plt.cm.ScalarMappable(cmap=cmap)
+            sm.set_clim(vmin, vmax)
+            colorized_rgba = (sm.to_rgba(img_bt) * 255).astype(np.uint8)
+
+            # Convert to PIL Image
+            pil_img = Image.fromarray(colorized_rgba)
+            draw = ImageDraw.Draw(pil_img)
+
+            if True:
+                # Load font
+                label_fontsize = final_h // 40
+                try:
+                    font = ImageFont.truetype('arial.ttf', label_fontsize)
+                except:
+                    font = ImageFont.load_default(label_fontsize)
+
+                # Add text (Position at upper-left, 0.5% text padding
+                padding = final_h // 200
+                position = (padding, padding)
+                left, top, right, bottom = draw.textbbox(position, title, font=font, anchor='lt')
+                draw.rectangle((left - padding, top - padding, right + padding, bottom + padding), fill='white')
+                draw.text(position, title, font=font, fill='black', anchor='lt')
+
+            # Save image
+            print('Saving now.')
+            pil_img.save(new_im_path, compress_level=9)
+            del pil_img
+
+            #plt.imsave(new_im_path, img_bt, cmap=cmap, vmin=vmin, vmax=vmax, format='png', pil_kwargs={'compress_level': 9})
             print(f'{new_im_path} saved.')
 
     del img_bt
 
-def batch_plot_BT_image(mode='file', cmap_name='ir_cc_2', gauss_smooth=True, zoom_in=True, save_image=True):
+def batch_plot_BT_image(mode='file', cmap_name='ir_cc_2', gauss_smooth=True, zoom_in=True, save_image=True, batch_name=None):
     print('start')
     if mode=='dir':
         image_folder = get_path_via_gui(mode=mode)
@@ -892,6 +985,6 @@ def batch_plot_BT_image(mode='file', cmap_name='ir_cc_2', gauss_smooth=True, zoo
         filename = os.path.basename(path)
         if '_IR_' in filename:
             plot_BT_image(path, image_folder, cmap_name,
-                          save_image=save_image, zoom_in=zoom_in, gauss_smooth=gauss_smooth)
+                          save_image=save_image, zoom_in=zoom_in, gauss_smooth=gauss_smooth, batch_name=batch_name)
         else:
             print(f'Skipped: {filename} is not a raw IR image.')
