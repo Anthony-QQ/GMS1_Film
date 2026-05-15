@@ -356,10 +356,12 @@ def find_film_boundary(img):
 
     return x, y, w, h
 
-# Usage
-# rect = find_film_boundary('image.png')
+# Usage:
+# img = load_lossless_image('D:/Documents/image.png')
+# rect = find_film_boundary(img)
 # if rect:
 #    x, y, w, h = rect
+#    xc, yc = (x + w // 2, y + h // 2)
 
 def get_bright_sampling_points(rect):
     '''
