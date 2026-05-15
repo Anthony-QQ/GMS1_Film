@@ -72,6 +72,30 @@ def BT2Film(img, bit_depth=8):
 
     return cs(img)
 
+def BTC_RGB_conversion(data, from_BTC, bit_depth=16):
+    '''
+    Convert between RGB (linear from 0-400K) and temperature (Celsius).
+    '''
+    C_TO_K = 273.15
+    T_min = 0
+    T_max = 400
+    bit_max = 2**bit_depth - 1
+    if from_BTC:
+        data_norm = np.clip(np.array(data + C_TO_K).astype(np.float32) / T_max, 0, 1)
+        if bit_depth == 16:
+            print(f'From BT (C) to count')
+            return (data_norm * bit_max).astype(np.uint16)
+        elif bit_depth == 8:
+            print(f'From BT (C) to count')
+            return (data_norm * bit_max).astype(np.uint8)
+        else:
+            raise ValueError('Invalid bit depth. Use 8 or 16.')
+    else:
+        data_norm = np.clip((np.array(data)).astype(np.float32) / bit_max, 0, 1)
+        print(f'From count to BT (C), in [{np.min(data_norm)}, {np.max(data_norm)}]')
+        return data_norm * T_max - C_TO_K
+
+
 def get_path_via_gui(mode='file',title=None):
     '''
     Opens a GUI to select either a 'file' or a 'directory'.
@@ -295,12 +319,29 @@ def find_film_boundary(img):
     '''
     Finds the rectangular coordinates of the film frame within the scan.
     '''
+    im_h, im_w = img.shape[:2]
 
     # Threshold to find anything brighter than the extreme outer border
     # Use a slightly larger blur to merge any internal text/noise into the cosmic block
     blurred = cv2.GaussianBlur(img, (5, 61), 0)
+
+    blurred_upper = blurred[:im_h // 2, :]
+    blurred_left = blurred[:, :im_w // 2]
     # Use a medium threshold (e.g., 100) to catch the 'dark' space background
-    _, thresh = cv2.threshold(blurred, 190, 255, cv2.THRESH_BINARY)
+    _, thresh = cv2.threshold(blurred_upper, 190, 255, cv2.THRESH_BINARY)
+
+    # Find contours of the thresholded areas
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+
+    if not contours:
+        return None
+
+    # Get the bounding box of the largest contour (the film frame)
+    largest_contour = max(contours, key=cv2.contourArea)
+    x, _, w, _ = cv2.boundingRect(largest_contour)
+
+    _, thresh = cv2.threshold(blurred_left, 190, 255, cv2.THRESH_BINARY)
 
     # Find contours of the thresholded areas
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -311,7 +352,7 @@ def find_film_boundary(img):
 
     # Get the bounding box of the largest contour (the film frame)
     largest_contour = max(contours, key=cv2.contourArea)
-    x, y, w, h = cv2.boundingRect(largest_contour)
+    _, y, _, h = cv2.boundingRect(largest_contour)
 
     return x, y, w, h
 
@@ -626,7 +667,7 @@ def generate_background_planes(shape, coeffs):
     plane = coeffs[0] * X + coeffs[1] * Y + coeffs[2]
     return plane
 
-def apply_nonlinear_calibration(img, bright_coeffs, dark_coeffs, std_bright, std_dark, crop=None):
+def apply_nonlinear_calibration(img, bright_coeffs, dark_coeffs, std_bright, std_dark, crop=None, save_BT=False):
     '''
     Calibrates image using a brightness-dependent non-linear offset.
     Solves A*brightness + B*sqrt(brightness) analytically.
@@ -708,12 +749,19 @@ def apply_nonlinear_calibration(img, bright_coeffs, dark_coeffs, std_bright, std
 
     return gray_img
 
-def run_batch_image_calibration(mode='dir',std_bright=221, std_dark=39, csv_path=None, csv_fix_path=None, do_crop=False):
+def run_batch_image_calibration(mode='dir', save_BT=False,
+                                std_bright=221, std_dark=39, csv_path=None, csv_fix_path=None, do_crop=False):
     '''
+    Calibrates a batch of images based on calibration coefficients.
 
+    :param mode: 'dir' or 'file' to select mode
     :param std_bright: standard bright region brightness
     :param std_dark: standard dark region brightness
-    :return:
+    :param save_BT: save as BT, scaled from 0K to 400K
+    :param csv_path: path to CSV file containing calibration coefficients
+    :param csv_fix_path: path to CSV file containing fixed calibration coefficients
+    :param do_crop: whether to crop images before calibration. Setting to True saves a lot of time, but makes
+    secondary calibration challenging.
     '''
     # 1. Setup
     print('start')
@@ -738,6 +786,13 @@ def run_batch_image_calibration(mode='dir',std_bright=221, std_dark=39, csv_path
     if do_crop:
         if csv_fix_path is None:
             csv_fix_path = get_path_via_gui(mode='csv',title='Select Fix CSV')
+            if not csv_fix_path:
+                if input('No fix CSV selected. Continue to calibrate full image? Y/N') == 'Y':
+                    do_crop = False
+                else:
+                    print('Calibration aborted, please prepare fix CSV.')
+                    return 0
+
         all_fixes_dict = load_fix_parameters(csv_fix_path)
 
     for path in images:
@@ -763,11 +818,22 @@ def run_batch_image_calibration(mode='dir',std_bright=221, std_dark=39, csv_path
             else:
                 crop = None
 
-            calibrated_img = apply_nonlinear_calibration(img, bright_coeffs, dark_coeffs, std_bright, std_dark, crop)
+            calibrated_img = apply_nonlinear_calibration(img, bright_coeffs, dark_coeffs, std_bright, std_dark, crop, save_BT)
             del img
-            print(f'{filename} calibrated, now saving')
+            current_bitdepth = 16 if np.max(calibrated_img) >= 256 else 8
+            if save_BT:
+                print(f'Before calibration, RGB in [{np.min(calibrated_img):.2f},{np.max(calibrated_img):.2f}]')
+                calibrated_img = Film2BT(calibrated_img, bit_depth=current_bitdepth)
+                print(f'BT in [{np.min(calibrated_img):.2f},{np.max(calibrated_img):.2f}]')
+                calibrated_img = BTC_RGB_conversion(calibrated_img, from_BTC=save_BT, bit_depth=current_bitdepth)
+                print(f'{filename} calibrated and converted, BT in [{np.min(calibrated_img):.2f},{np.max(calibrated_img):.2f}]')
+            else:
+                print(f'{filename} calibrated, now saving RGB')
+
             cal_name = change_extension(filename, '.png', ('.png', '.bmp', '.jpg', '.jpeg'))
             cal_name = cal_name.replace('.png', '_calibrated.png')
+            if save_BT:
+                cal_name = cal_name.replace('_calibrated.png', '_calibrated_BT.png')
             if do_crop:
                 cal_name = cal_name.replace('.png', f'_{r*2}px.png')
             cal_dir = get_calibration_folder(image_folder)
@@ -835,19 +901,20 @@ def blend_arrays_f(array_low, array_high, threshold, use_low=True, low_weight_ra
     :return:
     '''
     low_min, low_max = low_weight_range
+    array_span = np.max(array_low) - np.min(array_low)
     if array_low.shape != array_high.shape:
         raise ValueError('Arrays must have the same shape!')
 
     if use_low:
-        low_weight = np.clip((threshold - array_low) * 100000,low_min, low_max)
+        low_weight = np.clip((threshold - array_low) * 1e8 / array_span,low_min, low_max)
     else:
-        low_weight = np.clip((threshold - array_high) * 100000,low_min, low_max)
+        low_weight = np.clip((threshold - array_high) * 1e8 / array_span,low_min, low_max)
     blended = (array_low * low_weight) + (array_high * (1.0 - low_weight))
     return blended
 
 
-def plot_BT_image(image_path, image_folder,
-                  cn = 'ir_cc_2',gauss_smooth=True, zoom_in=True, save_image=False, batch_name=None):
+def plot_BT_image(image_path, image_folder, use_BT=False,
+                  cn = 'ir_cc_2', gauss_smooth=True, zoom_in=True, save_image=False, batch_name=None):
     # Find timestamp given filename format: GMS1_IR_YYYYMMDDZHHMM_nnnpx.png
     filename = os.path.basename(image_path)
     img = load_image_lossless(image_path)
@@ -859,20 +926,26 @@ def plot_BT_image(image_path, image_folder,
         bit_depth = 8
     print(f'Bit depth: {bit_depth}, brightest pixel: {np.max(img)}')
 
+
+    img = BTC_RGB_conversion(img, from_BTC=(not use_BT), bit_depth=bit_depth) if use_BT else img
+
     if gauss_smooth:
         img_original = np.array(img)
-        #img = cv2.GaussianBlur(img, (5, 1), 0.6)
-        #img = cv2.GaussianBlur(img, (1, 9), 1.4)
-        img = cv2.GaussianBlur(img, (5, 5), 0.75)
+        sigmaX = 0.75
+        img = cv2.GaussianBlur(img, (5, 5), sigmaX)
         img_blurred = np.array(img)
         del img
 
         # Uses original image for T > -45 deg C (darker brightness)
         blend_arrays = True
+        min_blend, max_blend = (0.5,1) if use_BT else (0,0.5)
         if blend_arrays:
             T_blur = -45
-            V_blur = BT2Film(T_blur, bit_depth=bit_depth)
-            display_img = blend_arrays_f(img_original, img_blurred, V_blur, low_weight_range=(0,0.5))
+            G_blur = T_blur if use_BT else BT2Film(T_blur, bit_depth=bit_depth)
+            if use_BT:
+                display_img = blend_arrays_f(img_blurred, img_original, G_blur, low_weight_range=(min_blend, max_blend))
+            else:
+                display_img = blend_arrays_f(img_original, img_blurred, G_blur, low_weight_range=(min_blend, max_blend))
         else:
             display_img = img_blurred
         del img_original, img_blurred
@@ -881,7 +954,7 @@ def plot_BT_image(image_path, image_folder,
         display_img = np.array(img)
         del img
 
-    img_bt = Film2BT(display_img, bit_depth=bit_depth)
+    img_bt = display_img if use_BT else Film2BT(display_img, bit_depth=bit_depth)
     del display_img
 
     h, w = img_bt.shape
@@ -965,7 +1038,8 @@ def plot_BT_image(image_path, image_folder,
 
     del img_bt
 
-def batch_plot_BT_image(mode='file', cmap_name='ir_cc_2', gauss_smooth=True, zoom_in=True, save_image=True, batch_name=None):
+def batch_plot_BT_image(mode='file', use_BT=False, cmap_name='ir_cc_2', gauss_smooth=True, zoom_in=True,
+                        save_image=True, batch_name=None):
     print('start')
     if mode=='dir':
         image_folder = get_path_via_gui(mode=mode)
@@ -984,7 +1058,7 @@ def batch_plot_BT_image(mode='file', cmap_name='ir_cc_2', gauss_smooth=True, zoo
     for path in images:
         filename = os.path.basename(path)
         if '_IR_' in filename:
-            plot_BT_image(path, image_folder, cmap_name,
+            plot_BT_image(path, image_folder, use_BT, cmap_name,
                           save_image=save_image, zoom_in=zoom_in, gauss_smooth=gauss_smooth, batch_name=batch_name)
         else:
             print(f'Skipped: {filename} is not a raw IR image.')

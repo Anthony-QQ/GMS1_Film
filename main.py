@@ -9,7 +9,11 @@ from my_functions import batch_plot_BT_image
 
 start_time = time.time()
 
-std_bright, std_dark = 221, 39
+STD_BRIGHT, STD_DARK = 221, 39
+CROP_B4_CAL = False
+SAVE_BT = True
+SAVE_METADATA = True
+
 reference_path = 'D:/Documents/TC and Weather/Images/W/1900-79/78 Rita/GMS-1 Scan/BMP_IR/GMS1_IR_19781022Z2333.bmp'
 csv_path = 'D:/Documents/TC and Weather/Images/W/1900-79/78 Rita/GMS-1 Scan/Calibration/film_background_analysis_20260515_034804.csv'
 fix_path = 'D:/Documents/TC and Weather/Images/W/1900-79/78 Rita/GMS-1 Scan/Calibration/Calibrated_PNG/Fix_78Rita.csv'
@@ -49,14 +53,14 @@ print(f'Max after saving again: {np.max(retrieve_img)}')'''
 
 mode = ['dir','file'][0]
 cmap_names = ['ir_bd','ir_cc','ir_zehr','ir_cc_2']
-#cmap_names = ['ir_cc_2']
+cmap_names = ['ir_cc_2']
 
-save_metadata = True
-#my_functions.run_batch_metadata_extraction(save_csv=save_metadata,save_preview=True)
 
-#my_functions.run_batch_image_calibration(mode, std_bright, std_dark, csv_path=csv_path, csv_fix_path=fix_path, do_crop=True)
+my_functions.run_batch_metadata_extraction(save_csv=SAVE_METADATA, save_preview=True)
 
-#my_functions.run_batch_image_calibration(mode, std_bright, std_dark, csv_path=None, csv_fix_path=None, do_crop=True)
+#my_functions.run_batch_image_calibration(mode, SAVE_BT, STD_BRIGHT, STD_DARK, csv_path=csv_path, csv_fix_path=fix_path, do_crop=CROP_B4_CAL)
+
+#my_functions.run_batch_image_calibration(mode, SAVE_BT, STD_BRIGHT, STD_DARK, csv_path=None, csv_fix_path=None, do_crop=CROP_B4_CAL)
 
 #my_functions.run_batch_crop_png(mode=mode,csv_path=fix_path)
 
@@ -69,7 +73,7 @@ if ask_name:
 else:
     batch_name = f'78_Olive'
 
-my_functions.batch_plot_BT_image(mode=mode, cmap_name=cmap_names, gauss_smooth=True, zoom_in=zoom_in, batch_name=batch_name)
+#my_functions.batch_plot_BT_image(mode=mode, use_BT=SAVE_BT, cmap_name=cmap_names, gauss_smooth=True, zoom_in=zoom_in, batch_name=batch_name)
 
 gc.collect()
 
